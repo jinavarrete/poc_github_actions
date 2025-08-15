@@ -3,6 +3,11 @@
 SELECT
   cliente_id,
   venta_total,
+  margen_bruto,
+  margen_neto,
+  margen_operativo,
+  margen_ebit,
+  margen_ebitda,
   -- ESTE ES UN USO CORRECTO de ORDER BY dentro de una función de ventana.
   -- El linter NO debería marcar esto como un error.
   ROW_NUMBER() OVER (PARTITION BY region ORDER BY venta_total DESC) as ranking_regional
