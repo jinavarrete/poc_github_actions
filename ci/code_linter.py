@@ -12,14 +12,15 @@ SQL_RULES = {
         re.compile(r"\bselect\s+\*", re.IGNORECASE),
     "Referencia a esquemas con prefijo 'prod.' o 'dev.' prohibida": 
         re.compile(r"\b(prod|dev)\.", re.IGNORECASE),
+    # --- NUEVA REGLA ---
+    "Uso de 'ORDER BY' a nivel de consulta final detectado. Esto puede causar un shuffle masivo y degradar el rendimiento. Usar ORDER BY solo dentro de funciones de ventana (OVER) o en subconsultas con LIMIT.":
+        re.compile(r"(?<!\()\s*\bORDER\s+BY\b", re.IGNORECASE),
 }
 
 # --- Reglas de Calidad para Python (Databricks/PySpark) ---
 PYTHON_RULES = {
     "Uso de '.collect()' detectado. Puede causar OOM en el driver. Usar '.take()' o '.show()' para inspección.":
         re.compile(r"\.collect\s*\("),
-    "Uso de '.toPandas()' sin '.limit()' es riesgoso. Considerar limitar los datos antes de la conversión.":
-        re.compile(r"(?<!limit\s*\(\s*\d+\s*\)\s*)\.toPandas\s*\("),
     "Se detectó una UDF de Python. Las funciones nativas de Spark son preferibles por rendimiento.":
         re.compile(r"=\s*udf\("),
     "Credenciales hardcodeadas detectadas. Usar dbutils.secrets.get().":
@@ -35,21 +36,27 @@ def remove_sql_comments(sql_code: str) -> str:
     return code
 
 def validate_sql_block(sql_code: str, start_line: int) -> List[Tuple[int, str, str]]:
-    """Aplica todas las reglas SQL a un bloque de texto."""
+    """
+    Aplica todas las reglas SQL a un bloque de texto, manejando patrones multilínea.
+    """
     violations = []
-    # Primero, limpiar comentarios del bloque completo
-    code_no_comments = remove_sql_comments(sql_code)
-    lines_no_comments = code_no_comments.split('\n')
     original_lines = sql_code.split('\n')
+    code_no_comments = remove_sql_comments(sql_code)
+    reported_lines = set()
 
-    for i, line in enumerate(lines_no_comments):
-        for rule_name, regex in SQL_RULES.items():
-            if regex.search(line):
-                violations.append((
-                    start_line + i,
-                    f"[SQL] {rule_name}",
-                    original_lines[i].strip()
-                ))
+    for rule_name, regex in SQL_RULES.items():
+        for match in regex.finditer(code_no_comments):
+            line_num = code_no_comments[:match.start()].count('\n') + start_line
+            if (line_num, rule_name) in reported_lines:
+                continue
+            original_line_index = line_num - start_line
+            if original_line_index < len(original_lines):
+                line_content = original_lines[original_line_index].strip()
+            else:
+                line_content = ""
+            violations.append((line_num, f"[SQL] {rule_name}", line_content))
+            reported_lines.add((line_num, rule_name))
+            
     return violations
 
 def validate_python_block(py_code: str, start_line: int) -> List[Tuple[int, str, str]]:
@@ -57,62 +64,39 @@ def validate_python_block(py_code: str, start_line: int) -> List[Tuple[int, str,
     violations = []
     lines = py_code.split('\n')
     for i, line in enumerate(lines):
-        # Ignorar líneas que son solo comentarios de Python
         if line.strip().startswith("#"):
             continue
         for rule_name, regex in PYTHON_RULES.items():
             if regex.search(line):
-                violations.append((
-                    start_line + i,
-                    f"[Python] {rule_name}",
-                    line.strip()
-                ))
+                violations.append((start_line + i, f"[Python] {rule_name}", line.strip()))
     return violations
 
 def analyze_file(file_path: str) -> List[Tuple[int, str, str]]:
     """Analiza un archivo, diferenciando entre .sql y .py."""
     print(f"\nAnalizando archivo: {file_path}")
     
-    with open(file_path, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        print(f"Error: Archivo no encontrado en la ruta '{file_path}'")
+        return []
+
     content = "".join(lines)
     all_violations = []
 
     if file_path.endswith(".sql"):
         all_violations.extend(validate_sql_block(content, 1))
-
     elif file_path.endswith(".py"):
-        # Lógica para notebooks de Databricks (%sql, %python)
-        in_sql_block = False
-        current_block = ""
-        block_start_line = 0
+        python_only_code = re.sub(r"^%sql.*?(?=(^%[a-zA-Z])|$)", "", content, flags=re.MULTILINE | re.DOTALL)
+        all_violations.extend(validate_python_block(python_only_code, 1))
+        sql_blocks = re.finditer(r"^(%sql.*?)(?=(^%[a-zA-Z])|$)", content, re.MULTILINE | re.DOTALL)
+        for match in sql_blocks:
+            block_content = match.group(1)
+            start_line = content[:match.start()].count('\n') + 1
+            all_violations.extend(validate_sql_block(block_content, start_line))
 
-        for i, line in enumerate(lines):
-            line_num = i + 1
-            # Detecta el inicio de una celda SQL y procesa el bloque anterior
-            if line.strip() == "%sql":
-                if not in_sql_block and current_block: # Procesar bloque Python anterior
-                    all_violations.extend(validate_python_block(current_block, block_start_line))
-                in_sql_block = True
-                current_block = ""
-                block_start_line = line_num + 1
-            # Detecta el fin de una celda SQL y procesa el bloque
-            elif line.strip().startswith("%") and in_sql_block:
-                all_violations.extend(validate_sql_block(current_block, block_start_line))
-                in_sql_block = False
-                current_block = line # El bloque actual es ahora de Python
-                block_start_line = line_num
-            else:
-                current_block += line
-        
-        # Procesar el último bloque que quedó en el buffer
-        if current_block:
-            if in_sql_block:
-                all_violations.extend(validate_sql_block(current_block, block_start_line))
-            else:
-                all_violations.extend(validate_python_block(current_block, block_start_line))
-
+    all_violations.sort(key=lambda x: x[0])
     return all_violations
 
 def main():
@@ -122,10 +106,16 @@ def main():
     
     files_to_scan = []
     for directory in DIRECTORIES_TO_SCAN:
+        if not os.path.isdir(directory):
+            print(f"Advertencia: El directorio '{directory}' no existe y será ignorado.")
+            continue
         for root, _, files in os.walk(directory):
             for file in files:
                 if file.endswith((".sql", ".py")):
                     files_to_scan.append(os.path.join(root, file))
+
+    if not files_to_scan:
+        print("No se encontraron archivos .py o .sql en los directorios especificados.")
 
     for file_path in files_to_scan:
         violations = analyze_file(file_path)
