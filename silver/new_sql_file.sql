@@ -7,5 +7,6 @@ FROM silver.process;
 SELECT
 columna_a,
 columna_b,
-columna_c
+columna_c,
+columna_d
 FROM prod.tb_fact_ventas;
