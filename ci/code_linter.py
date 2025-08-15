@@ -7,6 +7,8 @@ from typing import List, Tuple
 DIRECTORIES_TO_SCAN = ["silver/", "gold/"]
 
 # --- Reglas de Calidad para SQL ---
+# La regex para SELECT * ya funciona para multilínea gracias a `\s+`, 
+# el problema estaba en la lógica de lectura, no en la regex.
 SQL_RULES = {
     "Uso de 'SELECT *' prohibido": 
         re.compile(r"\bselect\s+\*", re.IGNORECASE),
@@ -18,9 +20,6 @@ SQL_RULES = {
 PYTHON_RULES = {
     "Uso de '.collect()' detectado. Puede causar OOM en el driver. Usar '.take()' o '.show()' para inspección.":
         re.compile(r"\.collect\s*\("),
-    # --- LÍNEA CORREGIDA ---
-    # La regex anterior con look-behind fallaba. Esta versión más simple detecta cualquier uso de .toPandas()
-    # y el mensaje le pide al desarrollador que asegure su uso correcto con .limit().
     "Uso de '.toPandas()' detectado. Asegúrese de que se use con '.limit()' para evitar errores OOM.":
         re.compile(r"\.toPandas\s*\("),
     "Se detectó una UDF de Python. Las funciones nativas de Spark son preferibles por rendimiento.":
@@ -37,21 +36,46 @@ def remove_sql_comments(sql_code: str) -> str:
     code = re.sub(r"--.*", "", code)
     return code
 
+# --- FUNCIÓN CORREGIDA ---
 def validate_sql_block(sql_code: str, start_line: int) -> List[Tuple[int, str, str]]:
-    """Aplica todas las reglas SQL a un bloque de texto."""
+    """
+    Aplica todas las reglas SQL a un bloque de texto, manejando patrones multilínea.
+    """
     violations = []
-    code_no_comments = remove_sql_comments(sql_code)
-    lines_no_comments = code_no_comments.split('\n')
+    # Guardamos las líneas originales para el reporte
     original_lines = sql_code.split('\n')
+    # Limpiamos los comentarios del bloque completo para el análisis
+    code_no_comments = remove_sql_comments(sql_code)
 
-    for i, line in enumerate(lines_no_comments):
-        for rule_name, regex in SQL_RULES.items():
-            if regex.search(line):
-                violations.append((
-                    start_line + i,
-                    f"[SQL] {rule_name}",
-                    original_lines[i].strip()
-                ))
+    reported_lines = set()
+
+    for rule_name, regex in SQL_RULES.items():
+        # Usamos finditer para encontrar TODAS las coincidencias en el bloque completo
+        for match in regex.finditer(code_no_comments):
+            # Calculamos el número de línea donde empieza la coincidencia
+            line_num = code_no_comments[:match.start()].count('\n') + start_line
+            
+            # Para evitar reportar la misma línea dos veces por reglas diferentes
+            # que coincidan en la misma línea.
+            if (line_num, rule_name) in reported_lines:
+                continue
+
+            # Obtenemos el contenido original de la línea para un reporte claro
+            # El índice es line_num - start_line porque original_lines es 0-indexed
+            # y relativo al bloque que estamos analizando.
+            original_line_index = line_num - start_line
+            if original_line_index < len(original_lines):
+                line_content = original_lines[original_line_index].strip()
+            else:
+                line_content = "" # Fallback por si algo sale mal
+
+            violations.append((
+                line_num,
+                f"[SQL] {rule_name}",
+                line_content
+            ))
+            reported_lines.add((line_num, rule_name))
+            
     return violations
 
 def validate_python_block(py_code: str, start_line: int) -> List[Tuple[int, str, str]]:
@@ -88,27 +112,20 @@ def analyze_file(file_path: str) -> List[Tuple[int, str, str]]:
         all_violations.extend(validate_sql_block(content, 1))
 
     elif file_path.endswith(".py"):
-        in_sql_block = False
-        current_block = ""
-        block_start_line = 1
-        python_block_content = ""
+        # Para archivos .py, la lógica actual de separar bloques es adecuada
+        # porque las reglas de Python son por línea y los bloques SQL son celdas completas.
         
-        # Primero, extraemos y validamos todo el código Python de una vez
-        # para evitar problemas con bloques segmentados.
-        # Eliminamos las celdas %sql para aislar el Python.
-        python_only_code = re.sub(r"%sql\n(.*?)(?=\n%|$)", "", content, flags=re.DOTALL)
+        # Validación de Python (excluyendo celdas SQL)
+        python_only_code = re.sub(r"^%sql.*?(?=(^%[a-zA-Z])|$)", "", content, flags=re.MULTILINE | re.DOTALL)
         all_violations.extend(validate_python_block(python_only_code, 1))
 
-        # Ahora, buscamos y validamos los bloques SQL
-        # Regex para encontrar bloques que empiezan con %sql
-        sql_blocks = re.finditer(r"^(%sql.*?)(?=(^%[a-zA-Z])|($))", content, re.MULTILINE | re.DOTALL)
+        # Validación de celdas SQL
+        sql_blocks = re.finditer(r"^(%sql.*?)(?=(^%[a-zA-Z])|$)", content, re.MULTILINE | re.DOTALL)
         for match in sql_blocks:
             block_content = match.group(1)
-            # Calcular línea de inicio del bloque
             start_line = content[:match.start()].count('\n') + 1
             all_violations.extend(validate_sql_block(block_content, start_line))
 
-    # Ordenar violaciones por número de línea para un reporte más claro
     all_violations.sort(key=lambda x: x[0])
     return all_violations
 
@@ -135,7 +152,6 @@ def main():
         if violations:
             total_violations += len(violations)
             print(f"  [!] Se encontraron {len(violations)} violaciones:")
-            # Imprimir violaciones agrupadas por archivo
             for line_num, rule, line_content in violations:
                 print(f"    - Línea {line_num}: {rule}")
                 print(f"      Fragmento: \"{line_content}\"")
