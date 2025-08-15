@@ -8,7 +8,7 @@ SELECT
   ROW_NUMBER() OVER (PARTITION BY region ORDER BY venta_total DESC) as ranking_regional
 
 FROM
-  silver.ventas_agregadas
+  dev.silver.ventas_agregadas
 
 -- ESTE ES UN USO INCORRECTO de ORDER BY que ordena todo el resultado final.
 -- El linter SÍ debería marcar esta línea como un error.
