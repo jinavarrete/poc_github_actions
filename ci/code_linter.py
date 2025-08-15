@@ -100,24 +100,27 @@ def analyze_file(file_path: str) -> List[Tuple[int, str, str]]:
     return all_violations
 
 def main():
-    """Función principal que recorre directorios y ejecuta las validaciones."""
+    """
+    Función principal que recibe una lista de archivos como argumentos
+    y ejecuta las validaciones solo en ellos.
+    """
     print("--- Iniciando Linter de Calidad de Código Unificado ---")
-    total_violations = 0
     
-    files_to_scan = []
-    for directory in DIRECTORIES_TO_SCAN:
-        if not os.path.isdir(directory):
-            print(f"Advertencia: El directorio '{directory}' no existe y será ignorado.")
-            continue
-        for root, _, files in os.walk(directory):
-            for file in files:
-                if file.endswith((".sql", ".py")):
-                    files_to_scan.append(os.path.join(root, file))
+    # Obtenemos la lista de archivos de los argumentos de la línea de comandos
+    # sys.argv[0] es el nombre del script, los archivos empiezan en el índice 1
+    files_to_scan = sys.argv[1:]
 
     if not files_to_scan:
-        print("No se encontraron archivos .py o .sql en los directorios especificados.")
+        print("No se pasaron archivos para analizar. Finalizando ejecución exitosamente.")
+        sys.exit(0)
 
+    total_violations = 0
     for file_path in files_to_scan:
+        # Verificamos si el archivo realmente existe antes de analizarlo
+        if not os.path.exists(file_path):
+            print(f"Advertencia: El archivo '{file_path}' no fue encontrado y será ignorado.")
+            continue
+
         violations = analyze_file(file_path)
         if violations:
             total_violations += len(violations)
@@ -132,7 +135,7 @@ def main():
         print(f"\n--- Resumen: Se encontraron {total_violations} violaciones en total. La ejecución falló. ---")
         sys.exit(1)
     else:
-        print("\n--- Resumen: Todos los archivos cumplen con las reglas de calidad. ¡Buen trabajo! ---")
+        print("\n--- Resumen: Todos los archivos modificados cumplen con las reglas de calidad. ¡Buen trabajo! ---")
         sys.exit(0)
 
 if __name__ == "__main__":

@@ -22,5 +22,22 @@ jobs:
         with:
           python-version: '3.10'
 
+      # --- PASO NUEVO: Obtener la lista de archivos modificados ---
+      - name: Get changed files
+        id: changed_files  # Le damos un ID para referenciar su salida
+        uses: tj-actions/changed-files@v44 # Usamos la action
+        with:
+          files: | # Le decimos qué archivos nos interesan
+            silver/**.sql
+            gold/**.sql
+            silver/**.py
+            gold/**.py
+
+      # --- PASO MODIFICADO: Ejecutar el linter solo en los archivos cambiados ---
       - name: Run Unified Linter
-        run: python ci/code_linter.py
+        # Solo ejecutamos este paso si el paso anterior encontró archivos modificados
+        if: steps.changed_files.outputs.any_changed == 'true'
+        run: |
+          echo "Analizando los siguientes archivos modificados:"
+          echo "${{ steps.changed_files.outputs.all_changed_files }}"
+          python ci/code_linter.py ${{ steps.changed_files.outputs.all_changed_files }}
