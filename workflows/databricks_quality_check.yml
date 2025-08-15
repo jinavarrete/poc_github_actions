@@ -1,0 +1,57 @@
+name: 'Databricks SQL Quality Check'
+
+on:
+  pull_request:
+    branches:
+      - 'Dev'
+    paths:
+      - 'silver/**'
+      - 'gold/**'
+
+jobs:
+  sql-linting-job:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 'Checkout code'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Necesario para comparar las ramas
+
+      - name: 'Get changed SQL files'
+        id: changed-files
+        run: |
+          # Compara la rama actual (del PR) con la rama de destino (Dev) y filtra los archivos .sql
+          FILES=$(git diff --name-only origin/${{ github.base_ref }} ${{ github.sha }} | grep -E '\.sql$' | grep -E '^(silver/|gold/)' || true)
+          if [[ -z "$FILES" ]]; then
+            echo "No SQL files changed in silver/ or gold/ directories."
+            echo "files_to_check=''" >> $GITHUB_OUTPUT
+          else
+            echo "Files to check:"
+            echo "$FILES"
+            echo "files_to_check=$(echo $FILES | tr '\n' ' ')" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 'Run SQL Quality Checks'
+        if: steps.changed-files.outputs.files_to_check != ''
+        run: |
+          echo "Running checks on: ${{ steps.changed-files.outputs.files_to_check }}"
+          
+          # Patrones prohibidos (case-insensitive)
+          # - Busca 'SELECT *' (con espacios variables)
+          # - Busca 'prod.' o 'dev.'
+          FORBIDDEN_PATTERNS='SELECT\s+\*|prod\.|dev\.'
+          
+          # Usamos `grep` para buscar los patrones en los archivos modificados.
+          # La opción -E permite usar expresiones regulares extendidas.
+          # La opción -i lo hace case-insensitive.
+          # La opción -H muestra el nombre del archivo en la salida.
+          # El comando fallará si `grep` encuentra alguna coincidencia.
+          if grep -iEH "$FORBIDDEN_PATTERNS" ${{ steps.changed-files.outputs.files_to_check }}; then
+            echo "------------------------------------------------------------------"
+            echo "ERROR: Forbidden SQL patterns found. Please fix the issues above."
+            echo "RULE: Do not use 'SELECT *' or direct environment references ('prod.', 'dev.')."
+            exit 1 # Falla el workflow
+          else
+            echo "SQL quality checks passed successfully!"
+          fi
