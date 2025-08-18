@@ -8,5 +8,6 @@ SELECT
 columna_a,
 columna_b,
 columna_c,
-columna_d
+columna_d,
+columna_e
 FROM prod.tb_fact_ventas;
